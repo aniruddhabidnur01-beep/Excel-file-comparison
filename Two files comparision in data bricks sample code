@@ -1,0 +1,81 @@
+# ==========================================================
+# Step 1: Import and Initialize Spark
+# ==========================================================
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import sha2, concat_ws
+
+spark = SparkSession.builder.appName("CompareExcelFiles").getOrCreate()
+
+# ==========================================================
+# Step 2: Read the Excel Files from DBFS
+# ==========================================================
+# Note: Use dbfs:/ paths inside Spark, not /dbfs/
+file1_path = "dbfs:/FileStore/tables/file1.xlsx"
+file2_path = "dbfs:/FileStore/tables/file2.xlsx"
+
+df1 = spark.read.format("com.crealytics.spark.excel") \
+    .option("header", "true") \
+    .option("inferSchema", "true") \
+    .load(file1_path)
+
+df2 = spark.read.format("com.crealytics.spark.excel") \
+    .option("header", "true") \
+    .option("inferSchema", "true") \
+    .load(file2_path)
+
+display(df1.limit(5))
+display(df2.limit(5))
+
+# ==========================================================
+# Step 3: Define a Primary Key (Change as needed)
+# ==========================================================
+key_col = "ID"  # replace with your unique identifier column
+
+# ==========================================================
+# Step 4: Compare DataFrames
+# ==========================================================
+
+# ➕ Added rows (exist in file2 but not in file1)
+added = df2.join(df1, on=key_col, how="left_anti")
+
+# ➖ Removed rows (exist in file1 but not in file2)
+removed = df1.join(df2, on=key_col, how="left_anti")
+
+# ✏️ Changed rows (same key, different data)
+non_key_cols = [c for c in df1.columns if c != key_col]
+
+df1_hash = df1.withColumn("hash", sha2(concat_ws("||", *non_key_cols), 256))
+df2_hash = df2.withColumn("hash", sha2(concat_ws("||", *non_key_cols), 256))
+
+changed = df1_hash.join(df2_hash, on=key_col) \
+    .filter(df1_hash.hash != df2_hash.hash) \
+    .select(df1_hash[key_col], df1_hash.hash.alias("old_hash"), df2_hash.hash.alias("new_hash"))
+
+# ==========================================================
+# Step 5: Display Results
+# ==========================================================
+print("Added rows:")
+display(added)
+
+print("Removed rows:")
+display(removed)
+
+print("Changed rows:")
+display(changed)
+
+# ==========================================================
+# Step 6: Summary Counts
+# ==========================================================
+summary = {
+    "Added Rows": added.count(),
+    "Removed Rows": removed.count(),
+    "Changed Rows": changed.count()
+}
+print(summary)
+
+# ==========================================================
+# Step 7: (Optional) Write Results Back to DBFS
+# ==========================================================
+added.write.mode("overwrite").format("csv").save("dbfs:/FileStore/output/added_rows")
+removed.write.mode("overwrite").format("csv").save("dbfs:/FileStore/output/removed_rows")
+changed.write.mode("overwrite").format("csv").save("dbfs:/FileStore/output/changed_rows")
